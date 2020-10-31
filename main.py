@@ -1,17 +1,19 @@
-from protonet import run_protonet
-from maml import run_maml
-from argparse import ArgumentParser
 
+from argparse import ArgumentParser
+import os
 
 def parse_args():
 
     parser = ArgumentParser()
 
+    # semantics: where to get data, what to run, where to log, verbosity
     parser.add_argument("learner", default="maml", choices=["maml", "protonet"],
                         help="Type of learning algorithm to use. Options are MAML and ProtoNet")
     parser.add_argument("--data-dir", default="../omniglot_resized")
     parser.add_argument("--log-dir", default="../logs/")
+    parser.add_argument("--tf-verbosity", default='1', type=str)
 
+    # common args
     parser.add_argument("--n-way", default=5, type=int)
     parser.add_argument("--k-shot", default=1, type=int)
 
@@ -34,6 +36,14 @@ def parse_args():
     parser.add_argument("--n-meta-test-query", default=5, type=int)
     
     return parser
+
+ARG_PARSER = parse_args()
+ARGS = ARG_PARSER.parse_args()
+if ARGS.tf_verbosity != '0':
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = ARGS.tf_verbosity
+
+from maml import run_maml
+from protonet import run_protonet
 
 def main(args):
 
@@ -64,8 +74,6 @@ def main(args):
     else:
         print("Invalid learner type!")
 
-if __name__ == "__main__":
-    parser = parse_args()
-    ARGS = parser.parse_args()
+if __name__ == "__main__":     
     main(ARGS)
 
