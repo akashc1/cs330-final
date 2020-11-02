@@ -4,6 +4,7 @@ from tensorflow.keras import layers
 from PIL import Image
 import os, glob, sys, pickle, random
 import pandas as pd
+import numpy as np
 from data import DataGenerator
 from util import cross_entropy_loss, accuracy
 
@@ -39,6 +40,36 @@ class ProtoNet(tf.keras.Model):
             out = conv(out)
         out = self.flatten(out)
         return out
+
+class Sampler(tf.keras.Model):
+    def __init__(self, latent_dim, num_unlabeled):
+        super(ProtoNet, self).__init__()
+        self.layer1 = tf.keras.layers.Dense()
+        self.layer2 = tf.keras.layers.Dense()
+        self.layer3 = tf.keras.layers.Dense(latent_dim)
+        self.num_unlabeled = num_unlabeled
+
+    def call(self, input, data):
+        x = self.layer1(input)
+        x = self.layer2(x)
+        loc = self.layer3(out)
+
+        sample = pickSample(loc, data)
+
+        return out
+
+    def pickSample(loc, data):
+        min_dist = np.inf
+        min_idx = -1
+        distances = []
+        for i in self.data.shape[0]:
+            sample_dist = np.lingalg.norm(self.data[i] - loc)
+            distances.append(sample_dist)
+            if sample_dist <= min_dist:
+                min_dist = sample_dist
+                min_idx = i
+        return data[min_idx]
+
 
 def ProtoLoss(x_latent, q_latent, labels_onehot, num_classes, num_support, num_queries):
     """
@@ -82,22 +113,26 @@ def ProtoLoss(x_latent, q_latent, labels_onehot, num_classes, num_support, num_q
 
     return ce_loss, acc
 
-def proto_net_train_step(model, optim, x, q, labels_ph):
+def proto_net_train_step(model, optim, x, q, u, labels_ph):
     num_classes, num_support, im_height, im_width, channels = x.shape
     num_queries = q.shape[1]
     x = tf.reshape(x, [-1, im_height, im_width, channels])
     q = tf.reshape(q, [-1, im_height, im_width, channels])
 
+
     with tf.GradientTape() as tape:
         x_latent = model(x)
         q_latent = model(q)
+        u_latent = model(u)
+        sampler_input = tf.reshape(x_latent,[1,-1])
+
         ce_loss, acc = ProtoLoss(x_latent, q_latent, labels_ph, num_classes, num_support, num_queries)
 
     gradients = tape.gradient(ce_loss, model.trainable_variables)
     optim.apply_gradients(zip(gradients, model.trainable_variables))
     return ce_loss, acc
 
-def proto_net_eval(model, x, q, labels_ph):
+def proto_net_eval(model, x, q, u, labels_ph):
     num_classes, num_support, im_height, im_width, channels = x.shape
     num_queries = q.shape[1]
     x = tf.reshape(x, [-1, im_height, im_width, channels])
@@ -105,12 +140,13 @@ def proto_net_eval(model, x, q, labels_ph):
 
     x_latent = model(x)
     q_latent = model(q)
+    u_latent = model(u)
     ce_loss, acc = ProtoLoss(x_latent, q_latent, labels_ph, num_classes, num_support, num_queries)
 
     return ce_loss, acc 
 
-def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
-                 n_meta_test_way=20, k_meta_test_shot=5, n_meta_test_query=5,
+def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5, n_unlabeled = 5,
+                 n_meta_test_way=20, k_meta_test_shot=5, n_meta_test_query=5, n_meta_test_unlabeled = 5,
                  logdir="../logs/"):
     n_epochs = 20
     n_episodes = 100
@@ -128,6 +164,9 @@ def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
                                         ])
 
     model = ProtoNet([num_filters]*num_conv_layers, latent_dim)
+
+    sampler = Sampler(latent_dim)
+    
     optimizer = tf.keras.optimizers.Adam()
 
     exp_string = ('proto_tr_cls_'+str(n_way)+'.tr_k_shot_' + str(k_shot) +
@@ -136,29 +175,35 @@ def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
     full_log_file = logdir + exp_string + '.csv'
 
     # call DataGenerator with k_shot+n_query samples per class
-    data_generator = DataGenerator(n_way, k_shot+n_query, n_meta_test_way, k_meta_test_shot+n_meta_test_query,
+    # Increase number of samples for each task (u unlabeled samples)
+    data_generator = DataGenerator(n_way, k_shot+n_query+n_unlabeled, n_meta_test_way, k_meta_test_shot+n_meta_test_query+n_meta_test_unlabeled,
                                     config={'data_folder': data_path})
+
 
     for ep in range(n_epochs):
         for epi in range(n_episodes):
         
-            # sample batch, partition into support/query, reshape
+            # sample batch, partition into support/query/unlabeled, reshape
             images, labels = data_generator.sample_batch("meta_train", batch_size=1, shuffle=False)
             support = tf.reshape(images[0, :, :k_shot, :],
                                 shape=(n_way, k_shot, im_height, im_width, 1))
-            query = tf.reshape(images[0, :, k_shot:, :],
+            query = tf.reshape(images[0, :, k_shot:k_shot + n_query, :],
                                 shape=(n_way, n_query, im_height, im_width, 1))
-            labels = tf.reshape(labels[0, :, k_shot:, :], shape=(n_way, n_query, n_way))
-
-            ls, ac = proto_net_train_step(model, optimizer, x=support, q=query, labels_ph=labels)
+            unlabeled = tf.reshape(images[0,n_query + k_shot:, :],
+                                shape=(n_way, n_unlabeled, im_height, im_width, 1))
+            labels = tf.reshape(labels[0, :, k_shot:k_shot + n_query, :], shape=(n_way, n_query, n_way))
+            
+            ls, ac = proto_net_train_step(model, optimizer, x=support, q=query, u=unlabeled, labels_ph=labels)
             if (epi+1) % 50 == 0:
 
-                # sample batch, partition into support/query, reshape
+                # sample batch, partition into support/query, reshape NOT unlabeled
                 images, labels = data_generator.sample_batch("meta_val", batch_size=1, shuffle=False)
                 support = tf.reshape(images[0, :, :k_shot, :],
                                 shape=(n_way, k_shot, im_height, im_width, 1))
-                query = tf.reshape(images[0, :, k_shot:, :],
+                query = tf.reshape(images[0, :, k_shot:k_shot + n_query, :],
                                     shape=(n_way, n_query, im_height, im_width, 1))
+                unlabeled = tf.reshape(images[0,n_query + k_shot:, :],
+                                shape=(n_way, n_unlabeled, im_height, im_width, 1))
                 labels = tf.reshape(labels[0, :, k_shot:, :], shape=(n_way, n_query, n_way))
                 val_ls, val_ac = proto_net_eval(model, x=support, q=query, labels_ph=labels)
                 print(f'[epoch {ep + 1}/{n_epochs}, episode {epi + 1}/{n_episodes}] => meta-training loss: {ls:.5f}, meta-training acc: {ac:.5f}, meta-val loss: {val_ls:.5f}, meta-val acc: {val_ac:.5f}')
