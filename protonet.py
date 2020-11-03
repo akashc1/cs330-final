@@ -48,8 +48,30 @@ class Sampler(tf.keras.Model):
         self.layer2 = tf.keras.layers.Dense(hidden_dim)
         self.layer3 = tf.keras.layers.Dense(latent_dim)
         #self.num_unlabeled = num_unlabeled
+"""
+    def pick_samples(self, target, data):
+        # target is (n_way, k_shot, latent_dim)
+        # data is (num_unlabeled*k, latent_dim), arbitrary k
 
-    def pick_sample(self, target, data):
+        n_way, k_shot, latent_dim = target.shape
+        shaped_data = tf.expand_dims(data, axis=0) # (1, num_unlabeled*k, latent_dim)
+
+        distances = tf.norm(target - shaped_data, axis=2)
+        min_inds = tf.argmin(distances, axis=1, output_type=tf.dtypes.int64)
+
+        sampled_unlabeled_points = tf.reshape([data[ind, :] for ind in min_inds], [n_way, latent_dim])
+        
+        return sampled_unlabeled_points"""
+
+    def call(self, input):
+        x = self.layer1(input)
+        x = self.layer2(x)
+        desired_latent = self.layer3(x) # will be (n_way, k_shot, latent_dim)
+        return desired_latent
+        #return self.pick_samples(desired_latent, data)
+
+    
+def pick_samples(target, data):
         # target is (n_way, k_shot, latent_dim)
         # data is (num_unlabeled*k, latent_dim), arbitrary k
 
@@ -63,21 +85,17 @@ class Sampler(tf.keras.Model):
         
         return sampled_unlabeled_points
 
-    def call(self, input, data):
-        x = self.layer1(input)
-        x = self.layer2(x)
-        desired_latent = self.layer3(x) # will be (n_way, k_shot, latent_dim)
+def get_query_prototypes(labels, q_latent, num_classes, num_queries):
+    query_class_split = tf.reshape(q_latent, (num_classes, num_queries, -1))
+    prototypes = tf.reduce_mean(query_class_split, axis=1) # (num_classes, latent_dim)
+    return prototypes
 
-        return self.pick_sample(desired_latent, data)
-
-    
-
-
-def ProtoLoss(x_latent, q_latent, labels_onehot, num_classes, num_support, num_queries):
+def ProtoLoss(desired_latent, x_latent, q_latent, labels_onehot, num_classes, num_unlabeled, num_support, num_queries):
     """
         calculates the prototype network loss using the latent representation of x
         and the latent representation of the query set
         Args:
+        desired_latent: num_classes unlabeled examples to refine 
         x_latent: latent representation of supports with shape [N*S, D], where D is the latent dimension
         q_latent: latent representation of queries with shape [N*Q, D], where D is the latent dimension
         labels_onehot: one-hot encodings of the labels of the queries with shape [N, Q, N]
@@ -94,6 +112,19 @@ def ProtoLoss(x_latent, q_latent, labels_onehot, num_classes, num_support, num_q
     # prototypes are just centroids of each class's examples in latent space
     x_class_split = tf.reshape(x_latent, (num_classes, num_support, latent_dim))
     prototypes = tf.reduce_mean(x_class_split, axis=1) # (num_classes, latent_dim)
+
+    closest_centroids = []
+    for u in range(num_unlabeled):
+        dists = []
+        for p in range(num_classes):
+            dists.append(tf.norm(desired_latent[u] - prototypes[p])) + np.random.normal(1e-5, scale=1e-6)
+        closest_centroids.append(tf.argmax(dists))
+    for u in range(num_unlabeled):
+        new_class = x_class_split[closest_centroids[u],:,:]
+        unlabeled_sample = tf.expand_dims(desired_latent[u], axis=0)
+        new_class = tf.concat([new_class, unlabeled_sample], axis = 1)
+        prototypes[closest_centroids[u]] = tf.reduce_mean(new_class, axis = 1)
+
 
     # need to repeat prototypes for easy distance calculation
     query_split = tf.reshape(q_latent, (num_classes, num_queries, 1, latent_dim))
@@ -131,12 +162,18 @@ def proto_net_train_step(model, sampler, optim, x, q, u, labels_ph):
         u_latent = model(u)
         sampler_input = tf.reshape(x_latent,[num_classes, num_support, -1])
 
-        desired_latent = sampler(sampler_input, u_latent) # (n_way, latent_dim)
+        desired_latent = sampler(sampler_input) # (n_way, latent_dim)
 
-        ce_loss, acc = ProtoLoss(x_latent, q_latent, labels_ph, num_classes, num_support, num_queries)
+        sampled_unlabeled_points = pick_samples(desired_latent, u_latent)
+        num_unlabeled = desired_latent.shape[0]*desired_latent.shape[1]
+        query_prototypes = get_query_prototypes(labels_ph, q_latent, num_classes, num_queries)
+        sampler_loss = -1*tf.norm(query_prototypes - sampled_unlabeled_points, axis = 1)
 
-    gradients = tape.gradient(ce_loss, model.trainable_variables)
-    optim.apply_gradients(zip(gradients, model.trainable_variables))
+        ce_loss, acc = ProtoLoss(sampled_unlabeled_points, x_latent, q_latent, labels_ph, num_classes, num_unlabeled, num_support, num_queries)
+
+    sampler_gradients = tape.gradient(sampler_loss, sampler.trainable_variables)
+    model_gradients = tape.gradient(ce_loss, model.trainable_variables)
+    optim.apply_gradients(zip(model_gradients, model.trainable_variables))
     return ce_loss, acc
 
 def proto_net_eval(model, x, q, u, labels_ph):
