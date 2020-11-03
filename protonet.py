@@ -65,8 +65,11 @@ class Sampler(tf.keras.Model):
 
     def call(self, input):
         x = self.layer1(input)
+        x = tf.keeras.activations.relu(x)
         x = self.layer2(x)
-        desired_latent = self.layer3(x) # will be (n_way, k_shot, latent_dim)
+        x = tf.keras.activations.relu(x)
+        x = self.layer3(x)
+        desired_latent = tf.keras.activations.relu(x) # will be (n_way, k_shot, latent_dim)
         return desired_latent
         #return self.pick_samples(desired_latent, data)
 
