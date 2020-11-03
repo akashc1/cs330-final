@@ -48,24 +48,10 @@ class Sampler(tf.keras.Model):
         self.layer2 = tf.keras.layers.Dense(hidden_dim)
         self.layer3 = tf.keras.layers.Dense(latent_dim)
         #self.num_unlabeled = num_unlabeled
-"""
-    def pick_samples(self, target, data):
-        # target is (n_way, k_shot, latent_dim)
-        # data is (num_unlabeled*k, latent_dim), arbitrary k
-
-        n_way, k_shot, latent_dim = target.shape
-        shaped_data = tf.expand_dims(data, axis=0) # (1, num_unlabeled*k, latent_dim)
-
-        distances = tf.norm(target - shaped_data, axis=2)
-        min_inds = tf.argmin(distances, axis=1, output_type=tf.dtypes.int64)
-
-        sampled_unlabeled_points = tf.reshape([data[ind, :] for ind in min_inds], [n_way, latent_dim])
-        
-        return sampled_unlabeled_points"""
 
     def call(self, input):
         x = self.layer1(input)
-        x = tf.keeras.activations.relu(x)
+        x = tf.keras.activations.relu(x)
         x = self.layer2(x)
         x = tf.keras.activations.relu(x)
         x = self.layer3(x)
@@ -120,13 +106,13 @@ def ProtoLoss(desired_latent, x_latent, q_latent, labels_onehot, num_classes, nu
     for u in range(num_unlabeled):
         dists = []
         for p in range(num_classes):
-            dists.append(tf.norm(desired_latent[u] - prototypes[p])) + np.random.normal(1e-5, scale=1e-6)
+            dists.append(tf.norm(desired_latent[u] - prototypes[p]))
         closest_centroids.append(tf.argmax(dists))
     for u in range(num_unlabeled):
         new_class = x_class_split[closest_centroids[u],:,:]
         unlabeled_sample = tf.expand_dims(desired_latent[u], axis=0)
         new_class = tf.concat([new_class, unlabeled_sample], axis = 1)
-        prototypes[closest_centroids[u]] = tf.reduce_mean(new_class, axis = 1)
+        prototypes = prototypes[closest_centroids[u]].assign(tf.reduce_mean(new_class, axis = 1))
 
 
     # need to repeat prototypes for easy distance calculation
