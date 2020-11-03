@@ -101,18 +101,19 @@ def ProtoLoss(desired_latent, x_latent, q_latent, labels_onehot, num_classes, nu
     # prototypes are just centroids of each class's examples in latent space
     x_class_split = tf.reshape(x_latent, (num_classes, num_support, latent_dim))
     prototypes = tf.reduce_mean(x_class_split, axis=1) # (num_classes, latent_dim)
+    prototypes += desired_latent/(num_support + 1)
 
-    closest_centroids = []
-    for u in range(num_unlabeled):
-        dists = []
-        for p in range(num_classes):
-            dists.append(tf.norm(desired_latent[u] - prototypes[p]))
-        closest_centroids.append(tf.argmax(dists))
-    for u in range(num_unlabeled):
-        new_class = x_class_split[closest_centroids[u],:,:]
-        unlabeled_sample = tf.expand_dims(desired_latent[u], axis=0)
-        new_class = tf.concat([new_class, unlabeled_sample], axis = 1)
-        prototypes = prototypes[closest_centroids[u]].assign(tf.reduce_mean(new_class, axis = 1))
+    #closest_centroids = []
+    #for u in range(num_unlabeled):
+      #  dists = []
+      #  for p in range(num_classes):
+      #      dists.append(tf.norm(desired_latent[u] - prototypes[p]))
+     #   closest_centroids.append(tf.argmax(dists))
+    #for u in range(num_unlabeled):
+        #new_class = x_class_split[closest_centroids[u],:,:]
+        #unlabeled_sample = tf.expand_dims(desired_latent[u], axis=0)
+        #new_class = tf.concat([new_class, unlabeled_sample], axis = 1)
+        #prototypes = prototypes[closest_centroids[u]].assign(tf.reduce_mean(new_class, axis = 1))
 
 
     # need to repeat prototypes for easy distance calculation
@@ -145,7 +146,7 @@ def proto_net_train_step(model, sampler, optim, x, q, u, labels_ph):
     u = tf.reshape(u, [-1, im_height, im_width, channels]) # (num_unlabeled*n_way, h, w, c)
 
 
-    with tf.GradientTape() as tape:
+    with tf.GradientTape() as tape, tf.GradientTape() as sample_tape:
         x_latent = model(x)
         q_latent = model(q)
         u_latent = model(u)
@@ -160,7 +161,7 @@ def proto_net_train_step(model, sampler, optim, x, q, u, labels_ph):
 
         ce_loss, acc = ProtoLoss(sampled_unlabeled_points, x_latent, q_latent, labels_ph, num_classes, num_unlabeled, num_support, num_queries)
 
-    sampler_gradients = tape.gradient(sampler_loss, sampler.trainable_variables)
+    sampler_gradients = sample_tape.gradient(sampler_loss, sampler.trainable_variables)
     model_gradients = tape.gradient(ce_loss, model.trainable_variables)
     optim.apply_gradients(zip(model_gradients, model.trainable_variables))
     return ce_loss, acc
@@ -216,7 +217,7 @@ def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
 
     for ep in range(n_epochs):
         for epi in range(n_episodes):
-        
+            print("epi ", epi)
             # sample batch, partition into support/query/unlabeled, reshape
             images, labels = data_generator.sample_batch("meta_train", batch_size=1, shuffle=False)
             support = tf.reshape(images[0, :, :k_shot, :],
@@ -229,7 +230,7 @@ def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
             
             ls, ac = proto_net_train_step(model, sampler, optimizer, x=support, q=query, u=unlabeled, labels_ph=labels)
             if (epi+1) % 50 == 0:
-
+                print("hello")
                 # sample batch, partition into support/query, reshape NOT unlabeled
                 images, labels = data_generator.sample_batch("meta_val", batch_size=1, shuffle=False)
                 support = tf.reshape(images[0, :, :k_shot, :],
