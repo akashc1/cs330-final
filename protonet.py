@@ -42,33 +42,35 @@ class ProtoNet(tf.keras.Model):
         return out
 
 class Sampler(tf.keras.Model):
-    def __init__(self, latent_dim, num_unlabeled):
-        super(ProtoNet, self).__init__()
-        self.layer1 = tf.keras.layers.Dense()
-        self.layer2 = tf.keras.layers.Dense()
+    def __init__(self, hidden_dim, latent_dim):
+        super(Sampler, self).__init__()
+        self.layer1 = tf.keras.layers.Dense(hidden_dim)
+        self.layer2 = tf.keras.layers.Dense(hidden_dim)
         self.layer3 = tf.keras.layers.Dense(latent_dim)
-        self.num_unlabeled = num_unlabeled
+        #self.num_unlabeled = num_unlabeled
+
+    def pick_sample(self, target, data):
+        # target is (n_way, k_shot, latent_dim)
+        # data is (num_unlabeled*k, latent_dim), arbitrary k
+
+        n_way, k_shot, latent_dim = target.shape
+        shaped_data = tf.expand_dims(data, axis=0) # (1, num_unlabeled*k, latent_dim)
+
+        distances = tf.norm(target - shaped_data, axis=2)
+        min_inds = tf.argmin(distances, axis=1, output_type=tf.dtypes.int64)
+
+        sampled_unlabeled_points = tf.reshape([data[ind, :] for ind in min_inds], [n_way, latent_dim])
+        
+        return sampled_unlabeled_points
 
     def call(self, input, data):
         x = self.layer1(input)
         x = self.layer2(x)
-        loc = self.layer3(out)
+        desired_latent = self.layer3(x) # will be (n_way, k_shot, latent_dim)
 
-        sample = pickSample(loc, data)
+        return self.pick_sample(desired_latent, data)
 
-        return out
-
-    def pickSample(loc, data):
-        min_dist = np.inf
-        min_idx = -1
-        distances = []
-        for i in self.data.shape[0]:
-            sample_dist = np.lingalg.norm(self.data[i] - loc)
-            distances.append(sample_dist)
-            if sample_dist <= min_dist:
-                min_dist = sample_dist
-                min_idx = i
-        return data[min_idx]
+    
 
 
 def ProtoLoss(x_latent, q_latent, labels_onehot, num_classes, num_support, num_queries):
@@ -113,18 +115,23 @@ def ProtoLoss(x_latent, q_latent, labels_onehot, num_classes, num_support, num_q
 
     return ce_loss, acc
 
-def proto_net_train_step(model, optim, x, q, u, labels_ph):
+def proto_net_train_step(model, sampler, optim, x, q, u, labels_ph):
     num_classes, num_support, im_height, im_width, channels = x.shape
     num_queries = q.shape[1]
+
+    print(f"Initial u shape: {u.shape}")
     x = tf.reshape(x, [-1, im_height, im_width, channels])
     q = tf.reshape(q, [-1, im_height, im_width, channels])
+    u = tf.reshape(u, [-1, im_height, im_width, channels]) # (num_unlabeled*n_way, h, w, c)
 
 
     with tf.GradientTape() as tape:
         x_latent = model(x)
         q_latent = model(q)
         u_latent = model(u)
-        sampler_input = tf.reshape(x_latent,[1,-1])
+        sampler_input = tf.reshape(x_latent,[num_classes, num_support, -1])
+
+        desired_latent = sampler(sampler_input, u_latent) # (n_way, latent_dim)
 
         ce_loss, acc = ProtoLoss(x_latent, q_latent, labels_ph, num_classes, num_support, num_queries)
 
@@ -154,6 +161,7 @@ def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
     im_width, im_height, channels = 28, 28, 1
     num_filters = 32
     latent_dim = 16
+    hidden_dim = 32
     num_conv_layers = 3
     n_meta_test_episodes = 1000
 
@@ -165,7 +173,7 @@ def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
 
     model = ProtoNet([num_filters]*num_conv_layers, latent_dim)
 
-    sampler = Sampler(latent_dim)
+    sampler = Sampler( hidden_dim, latent_dim)
     
     optimizer = tf.keras.optimizers.Adam()
 
@@ -189,11 +197,11 @@ def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
                                 shape=(n_way, k_shot, im_height, im_width, 1))
             query = tf.reshape(images[0, :, k_shot:k_shot + n_query, :],
                                 shape=(n_way, n_query, im_height, im_width, 1))
-            unlabeled = tf.reshape(images[0,n_query + k_shot:, :],
+            unlabeled = tf.reshape(images[0, :, n_query + k_shot:, :],
                                 shape=(n_way, n_unlabeled, im_height, im_width, 1))
             labels = tf.reshape(labels[0, :, k_shot:k_shot + n_query, :], shape=(n_way, n_query, n_way))
             
-            ls, ac = proto_net_train_step(model, optimizer, x=support, q=query, u=unlabeled, labels_ph=labels)
+            ls, ac = proto_net_train_step(model, sampler, optimizer, x=support, q=query, u=unlabeled, labels_ph=labels)
             if (epi+1) % 50 == 0:
 
                 # sample batch, partition into support/query, reshape NOT unlabeled
