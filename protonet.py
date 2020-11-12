@@ -74,12 +74,13 @@ def pick_samples(target, data):
         
         return sampled_unlabeled_points
 
-def get_query_prototypes(labels, q_latent, num_classes, num_queries):
-    query_class_split = tf.reshape(q_latent, (num_classes, num_queries, -1))
-    prototypes = tf.reduce_mean(query_class_split, axis=1) # (num_classes, latent_dim)
+def get_prototypes(labels, latent, num_classes, num_samples):
+    class_split = tf.reshape(latent, (num_classes, num_samples, -1))
+    prototypes = tf.reduce_mean(class_split, axis=1) # (num_classes, latent_dim)
     return prototypes
 
-def ProtoLoss(desired_latent, x_latent, q_latent, labels_onehot, num_classes, num_unlabeled, num_support, num_queries):
+
+def ProtoLoss(prototypes, x_latent, q_latent, labels_onehot, num_classes, num_unlabeled, num_support, num_queries):
     """
         calculates the prototype network loss using the latent representation of x
         and the latent representation of the query set
@@ -99,9 +100,8 @@ def ProtoLoss(desired_latent, x_latent, q_latent, labels_onehot, num_classes, nu
     latent_dim = x_latent.shape[-1]
 
     # prototypes are just centroids of each class's examples in latent space
-    x_class_split = tf.reshape(x_latent, (num_classes, num_support, latent_dim))
-    prototypes = tf.reduce_mean(x_class_split, axis=1) # (num_classes, latent_dim)
-    prototypes += desired_latent/(num_support + 1)
+    #x_class_split = tf.reshape(x_latent, (num_classes, num_support, latent_dim))
+    #prototypes = tf.reduce_mean(x_class_split, axis=1) # (num_classes, latent_dim)
 
     #closest_centroids = []
     #for u in range(num_unlabeled):
@@ -136,9 +136,31 @@ def ProtoLoss(desired_latent, x_latent, q_latent, labels_onehot, num_classes, nu
 
     return ce_loss, acc
 
-def proto_net_train_step(model, sampler, optim, x, q, u, labels_ph):
+def update_protos(u_latent, u_weights, labeled_prototypes, num_support):
+    num_classes = labeled_prototypes.shape[0]
+    num_unlabeled = u_latent.shape[0]
+
+    u_class_totals = tf.zeros([latent_dim, num_classes])
+    for i in range(num_unlabeled):
+        u_latent_i = tf.tile(u_latent[i], multiples = [1,num_classes]) #(latent_dim, num_classes)
+        u_weights_i = u_weights[i]
+        u_class_totals += tf.multiply([u_latent_i, u_weights_i], axis = 1)
+
+    u_weight_totals = tf.reduce_sum(u_weights, axis=0)
+    new_prototypes = tf.divide(tf.reduce_sum(class_totals + labeled_prototypes*num_support),(num_support + u_weight_totals))
+    return new_prototypes #(num_classes, latent_dim)
+
+
+def proto_net_train_step(embedder, weighter, optim, x, q, u, labels_ph):
     num_classes, num_support, im_height, im_width, channels = x.shape
+    x = tf.reshape(x, [-1, im_height, im_width, channels])
+    q = tf.reshape(q, [-1, im_height, im_width, channels])
+    u = tf.reshape(u, [-1, im_height, im_width, channels])
     num_queries = q.shape[1]
+    num_unlabeled = u.shape[1]
+
+    x_labels = labels_ph[:, :num_support, :]
+    q_labels = labels_ph[:, num_support:, :]
 
     print(f"Initial u shape: {u.shape}")
     x = tf.reshape(x, [-1, im_height, im_width, channels])
@@ -146,26 +168,77 @@ def proto_net_train_step(model, sampler, optim, x, q, u, labels_ph):
     u = tf.reshape(u, [-1, im_height, im_width, channels]) # (num_unlabeled*n_way, h, w, c)
 
 
-    with tf.GradientTape() as tape, tf.GradientTape() as sample_tape:
-        x_latent = model(x)
-        q_latent = model(q)
-        u_latent = model(u)
-        sampler_input = tf.reshape(x_latent,[num_classes, num_support, -1])
 
-        desired_latent = sampler(sampler_input) # (n_way, latent_dim)
+    with tf.GradientTape() as embedder_tape, tf.GradientTape() as weighter_tape:
+        x_latent = embedder(x)
+        q_latent = embedder(q)
+        u_latent = embedder(u) #(num_unlabeled, latent_dim)
 
-        sampled_unlabeled_points = pick_samples(desired_latent, u_latent)
-        num_unlabeled = desired_latent.shape[0]*desired_latent.shape[1]
-        query_prototypes = get_query_prototypes(labels_ph, q_latent, num_classes, num_queries)
-        sampler_loss = -1*tf.norm(query_prototypes - sampled_unlabeled_points, axis = 1)
+        latent_dim = x_latent.shape[-1]
 
-        ce_loss, acc = ProtoLoss(sampled_unlabeled_points, x_latent, q_latent, labels_ph, num_classes, num_unlabeled, num_support, num_queries)
+        labeled_prototypes = get_prototpes(x_labels, x, num_classes, num_support)
 
-    sampler_gradients = sample_tape.gradient(sampler_loss, sampler.trainable_variables)
-    model_gradients = tape.gradient(ce_loss, model.trainable_variables)
-    optim.apply_gradients(zip(model_gradients, model.trainable_variables))
+        #Create weights for unlabeled samples
+        flattened_protos = tf.reshape(labeled_prototypes, (-1,))
+        flattened_protos = tf.stack([labeled_prototypes, num_unlabeled], axis=1)#((latent_dim*num_classes, num_unlabeled))
+        weight_input = tf.concat([u_latent, flattened_protos]) #(latent_dim*num_classes+1, num_unlabeled)
+        u_weights = weighter(weight_input) #(num_unlabeled, num_classes)
+
+        new_prototypes = update_protos(u_latent, u_weights, labeled_prototypes)
+
+        ce_loss, acc = ProtoLoss(new_prototypes, x_latent, q_latent, labels_ph, num_classes, num_unlabeled, num_support, num_queries)
+
+    weighter_grads = weighter_tape.gradient(ce_loss, weighter.trainable_variables)
+    embedder_grads = embedder_tape.gradient(ce_loss, embedder.trainable_variables)
+    optim.apply_gradients(zip(embedder_grads, embedder.trainable_variables))
+    optim.apply_gradients(zip(weighter_grads, weighter.trainable_variables))
+
     return ce_loss, acc
 
+def proto_net_eval(embedder, weighter, optim, x, q, u, labels_ph):
+    num_classes, num_support, im_height, im_width, channels = x.shape
+    x = tf.reshape(x, [-1, im_height, im_width, channels])
+    q = tf.reshape(q, [-1, im_height, im_width, channels])
+    u = tf.reshape(u, [-1, im_height, im_width, channels])
+    num_queries = q.shape[1]
+    num_unlabeled = u.shape[1]
+
+    x_labels = labels_ph[:, :num_support, :]
+    q_labels = labels_ph[:, num_support:, :]
+
+    print(f"Initial u shape: {u.shape}")
+    x = tf.reshape(x, [-1, im_height, im_width, channels])
+    q = tf.reshape(q, [-1, im_height, im_width, channels])
+    u = tf.reshape(u, [-1, im_height, im_width, channels]) # (num_unlabeled*n_way, h, w, c)
+
+
+
+    with tf.GradientTape() as embedder_tape, tf.GradientTape() as weighter_tape:
+        x_latent = embedder(x)
+        q_latent = embedder(q)
+        u_latent = embedder(u) #(num_unlabeled, latent_dim)
+
+        latent_dim = x_latent.shape[-1]
+
+        labeled_prototypes = get_prototpes(x_labels, x, num_classes, num_support)
+
+        #Create weights for unlabeled samples
+        flattened_protos = tf.reshape(labeled_prototypes, (-1,))
+        flattened_protos = tf.stack([labeled_prototypes, num_unlabeled], axis=1)#((latent_dim*num_classes, num_unlabeled))
+        weight_input = tf.concat([u_latent, flattened_protos]) #(latent_dim*num_classes+1, num_unlabeled)
+        u_weights = weighter(weight_input) #(num_unlabeled, num_classes)
+
+        new_prototypes = update_protos(u_latent, u_weights, labeled_prototypes)
+
+        ce_loss, acc = ProtoLoss(new_prototypes, x_latent, q_latent, labels_ph, num_classes, num_unlabeled, num_support, num_queries)
+
+    weighter_grads = weighter_tape.gradient(ce_loss, weighter.trainable_variables)
+    embedder_grads = embedder_tape.gradient(ce_loss, embedder.trainable_variables)
+    optim.apply_gradients(zip(embedder_grads, embedder.trainable_variables))
+    optim.apply_gradients(zip(weighter_grads, weighter.trainable_variables))
+    
+    return ce_loss, acc
+"""
 def proto_net_eval(model, x, q, u, labels_ph):
     num_classes, num_support, im_height, im_width, channels = x.shape
     num_queries = q.shape[1]
@@ -178,7 +251,7 @@ def proto_net_eval(model, x, q, u, labels_ph):
     ce_loss, acc = ProtoLoss(x_latent, q_latent, labels_ph, num_classes, num_support, num_queries)
 
     return ce_loss, acc 
-
+"""
 def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5, n_unlabeled = 5,
                  n_meta_test_way=20, k_meta_test_shot=5, n_meta_test_query=5, n_meta_test_unlabeled = 5,
                  logdir="../logs/"):
@@ -200,7 +273,7 @@ def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
 
     model = ProtoNet([num_filters]*num_conv_layers, latent_dim)
 
-    sampler = Sampler( hidden_dim, latent_dim)
+    weighter = Sampler(hidden_dim, (n_way + 1)*latent_dim)
     
     optimizer = tf.keras.optimizers.Adam()
 
@@ -226,9 +299,9 @@ def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
                                 shape=(n_way, n_query, im_height, im_width, 1))
             unlabeled = tf.reshape(images[0, :, n_query + k_shot:, :],
                                 shape=(n_way, n_unlabeled, im_height, im_width, 1))
-            labels = tf.reshape(labels[0, :, k_shot:k_shot + n_query, :], shape=(n_way, n_query, n_way))
+            labels = tf.reshape(labels[0, :, :k_shot + n_query, :], shape=(n_way, n_query, n_way))
             
-            ls, ac = proto_net_train_step(model, sampler, optimizer, x=support, q=query, u=unlabeled, labels_ph=labels)
+            ls, ac = proto_net_train_step(model, weighter, optimizer, x=support, q=query, u=unlabeled, labels_ph=labels)
             if (epi+1) % 50 == 0:
                 print("hello")
                 # sample batch, partition into support/query, reshape NOT unlabeled
@@ -239,7 +312,7 @@ def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
                                     shape=(n_way, n_query, im_height, im_width, 1))
                 unlabeled = tf.reshape(images[0,n_query + k_shot:, :],
                                 shape=(n_way, n_unlabeled, im_height, im_width, 1))
-                labels = tf.reshape(labels[0, :, k_shot:, :], shape=(n_way, n_query, n_way))
+                labels = tf.reshape(labels[0, :, :k_shot + n_query, :], shape=(n_way, n_query, n_way))
                 val_ls, val_ac = proto_net_eval(model, x=support, q=query, labels_ph=labels)
                 print(f'[epoch {ep + 1}/{n_epochs}, episode {epi + 1}/{n_episodes}] => meta-training loss: {ls:.5f}, meta-training acc: {ac:.5f}, meta-val loss: {val_ls:.5f}, meta-val acc: {val_ac:.5f}')
                 
