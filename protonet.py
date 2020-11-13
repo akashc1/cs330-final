@@ -42,11 +42,11 @@ class ProtoNet(tf.keras.Model):
         return out
 
 class Sampler(tf.keras.Model):
-    def __init__(self, hidden_dim, latent_dim):
+    def __init__(self, hidden_dim, num_classes):
         super(Sampler, self).__init__()
         self.layer1 = tf.keras.layers.Dense(hidden_dim)
         self.layer2 = tf.keras.layers.Dense(hidden_dim)
-        self.layer3 = tf.keras.layers.Dense(latent_dim)
+        self.layer3 = tf.keras.layers.Dense(num_classes)
         #self.num_unlabeled = num_unlabeled
 
     def call(self, input):
@@ -55,8 +55,8 @@ class Sampler(tf.keras.Model):
         x = self.layer2(x)
         x = tf.keras.activations.relu(x)
         x = self.layer3(x)
-        desired_latent = tf.keras.activations.relu(x) # will be (n_way, k_shot, latent_dim)
-        return desired_latent
+        update_weights = tf.keras.activations.relu(x) # will be (n_way, k_shot, latent_dim)
+        return update_weights
         #return self.pick_samples(desired_latent, data)
 
     
@@ -96,6 +96,8 @@ def ProtoLoss(prototypes, x_latent, q_latent, labels_onehot, num_classes, num_un
         ce_loss: the cross entropy loss between the predicted labels and true labels
         acc: the accuracy of classification on the queries
     """
+
+    
     
     latent_dim = x_latent.shape[-1]
 
@@ -139,107 +141,77 @@ def ProtoLoss(prototypes, x_latent, q_latent, labels_onehot, num_classes, num_un
 def update_protos(u_latent, u_weights, labeled_prototypes, num_support):
     num_classes = labeled_prototypes.shape[0]
     num_unlabeled = u_latent.shape[0]
+    latent_dim = u_latent.shape[1]
 
-    u_class_totals = tf.zeros([latent_dim, num_classes])
+    u_class_totals = tf.zeros([num_classes, latent_dim])
     for i in range(num_unlabeled):
-        u_latent_i = tf.tile(u_latent[i], multiples = [1,num_classes]) #(latent_dim, num_classes)
-        u_weights_i = u_weights[i]
-        u_class_totals += tf.multiply([u_latent_i, u_weights_i], axis = 1)
+        u_latent_i = tf.expand_dims(u_latent[i], axis=0)
+        u_latent_i = tf.tile(u_latent_i, multiples = [num_classes, 1]) #(num_classes, latent_dim)
+        u_weights_i = tf.expand_dims(u_weights[i], axis=-1) # (1, num_classes)
+        u_weights_i = tf.tile(u_weights_i, multiples=[1, latent_dim])
+        u_class_totals += tf.multiply(u_latent_i, u_weights_i)
 
-    u_weight_totals = tf.reduce_sum(u_weights, axis=0)
-    new_prototypes = tf.divide(tf.reduce_sum(class_totals + labeled_prototypes*num_support),(num_support + u_weight_totals))
+    # new_prototypes = prototypes + (1/(num_support + total_unlabeled_weight))*(update - prototypes)
+    # u_weights.shape = (num_unlabeled, num_classes)
+    u_weight_totals = tf.expand_dims(tf.reduce_sum(u_weights, axis=0), axis=-1)
+    aggregate_protos = u_class_totals + labeled_prototypes*num_support
+    aggregate_weights = num_support + u_weight_totals
+    new_prototypes = tf.divide(aggregate_protos, aggregate_weights)
     return new_prototypes #(num_classes, latent_dim)
 
 
-def proto_net_train_step(embedder, weighter, optim, x, q, u, labels_ph):
+def proto_net_train_step(embedder, weighter, optim, x, q, u, labels_ph, eval=False):
     num_classes, num_support, im_height, im_width, channels = x.shape
+    num_queries = q.shape[1]
     x = tf.reshape(x, [-1, im_height, im_width, channels])
     q = tf.reshape(q, [-1, im_height, im_width, channels])
     u = tf.reshape(u, [-1, im_height, im_width, channels])
-    num_queries = q.shape[1]
-    num_unlabeled = u.shape[1]
 
-    x_labels = labels_ph[:, :num_support, :]
-    q_labels = labels_ph[:, num_support:, :]
-
-    print(f"Initial u shape: {u.shape}")
-    x = tf.reshape(x, [-1, im_height, im_width, channels])
-    q = tf.reshape(q, [-1, im_height, im_width, channels])
-    u = tf.reshape(u, [-1, im_height, im_width, channels]) # (num_unlabeled*n_way, h, w, c)
-
-
-
-    with tf.GradientTape() as embedder_tape, tf.GradientTape() as weighter_tape:
-        x_latent = embedder(x)
-        q_latent = embedder(q)
-        u_latent = embedder(u) #(num_unlabeled, latent_dim)
-
-        latent_dim = x_latent.shape[-1]
-
-        labeled_prototypes = get_prototpes(x_labels, x, num_classes, num_support)
-
-        #Create weights for unlabeled samples
-        flattened_protos = tf.reshape(labeled_prototypes, (-1,))
-        flattened_protos = tf.stack([labeled_prototypes, num_unlabeled], axis=1)#((latent_dim*num_classes, num_unlabeled))
-        weight_input = tf.concat([u_latent, flattened_protos]) #(latent_dim*num_classes+1, num_unlabeled)
-        u_weights = weighter(weight_input) #(num_unlabeled, num_classes)
-
-        new_prototypes = update_protos(u_latent, u_weights, labeled_prototypes)
-
-        ce_loss, acc = ProtoLoss(new_prototypes, x_latent, q_latent, labels_ph, num_classes, num_unlabeled, num_support, num_queries)
-
-    weighter_grads = weighter_tape.gradient(ce_loss, weighter.trainable_variables)
-    embedder_grads = embedder_tape.gradient(ce_loss, embedder.trainable_variables)
-    optim.apply_gradients(zip(embedder_grads, embedder.trainable_variables))
-    optim.apply_gradients(zip(weighter_grads, weighter.trainable_variables))
-
-    return ce_loss, acc
-
-def proto_net_eval(embedder, weighter, optim, x, q, u, labels_ph):
-    num_classes, num_support, im_height, im_width, channels = x.shape
-    x = tf.reshape(x, [-1, im_height, im_width, channels])
-    q = tf.reshape(q, [-1, im_height, im_width, channels])
-    u = tf.reshape(u, [-1, im_height, im_width, channels])
-    num_queries = q.shape[1]
-    num_unlabeled = u.shape[1]
-
-    x_labels = labels_ph[:, :num_support, :]
-    q_labels = labels_ph[:, num_support:, :]
-
-    print(f"Initial u shape: {u.shape}")
-    x = tf.reshape(x, [-1, im_height, im_width, channels])
-    q = tf.reshape(q, [-1, im_height, im_width, channels])
-    u = tf.reshape(u, [-1, im_height, im_width, channels]) # (num_unlabeled*n_way, h, w, c)
-
-
-
-    with tf.GradientTape() as embedder_tape, tf.GradientTape() as weighter_tape:
-        x_latent = embedder(x)
-        q_latent = embedder(q)
-        u_latent = embedder(u) #(num_unlabeled, latent_dim)
-
-        latent_dim = x_latent.shape[-1]
-
-        labeled_prototypes = get_prototpes(x_labels, x, num_classes, num_support)
-
-        #Create weights for unlabeled samples
-        flattened_protos = tf.reshape(labeled_prototypes, (-1,))
-        flattened_protos = tf.stack([labeled_prototypes, num_unlabeled], axis=1)#((latent_dim*num_classes, num_unlabeled))
-        weight_input = tf.concat([u_latent, flattened_protos]) #(latent_dim*num_classes+1, num_unlabeled)
-        u_weights = weighter(weight_input) #(num_unlabeled, num_classes)
-
-        new_prototypes = update_protos(u_latent, u_weights, labeled_prototypes)
-
-        ce_loss, acc = ProtoLoss(new_prototypes, x_latent, q_latent, labels_ph, num_classes, num_unlabeled, num_support, num_queries)
-
-    weighter_grads = weighter_tape.gradient(ce_loss, weighter.trainable_variables)
-    embedder_grads = embedder_tape.gradient(ce_loss, embedder.trainable_variables)
-    optim.apply_gradients(zip(embedder_grads, embedder.trainable_variables))
-    optim.apply_gradients(zip(weighter_grads, weighter.trainable_variables))
+    q_labels = labels_ph[:, num_support:num_support+num_queries, :]
     
+    num_unlabeled = u.shape[0]
+
+    x_labels = labels_ph[:, :num_support, :]
+    q_labels = labels_ph[:, num_support:, :]
+
+    x = tf.reshape(x, [-1, im_height, im_width, channels])
+    q = tf.reshape(q, [-1, im_height, im_width, channels])
+    u = tf.reshape(u, [-1, im_height, im_width, channels]) # (num_unlabeled*n_way, h, w, c)
+
+    with tf.GradientTape() as embedder_tape, tf.GradientTape() as weighter_tape:
+        x_latent = embedder(x)
+        q_latent = embedder(q)
+        u_latent = embedder(u) #(num_unlabeled, latent_dim)
+
+        latent_dim = x_latent.shape[-1]
+
+        labeled_prototypes = get_prototypes(x_labels, x_latent, num_classes, num_support) # (num_classes, latent_dim)
+
+        #Create weights for unlabeled samples
+        flattened_protos = tf.reshape(labeled_prototypes, (-1,)) #(num_classes * latent_dim,)
+        flattened_protos = tf.expand_dims(flattened_protos, axis=0)
+        flattened_protos = tf.tile(flattened_protos, multiples=[num_unlabeled, 1]) # (num_unlabeled, num_classes*latent_dim)
+       
+        weight_input = tf.concat([u_latent, flattened_protos], axis=1) #(num_unlabeled, latent_dim*num_classes+1)
+        u_weights = weighter(weight_input) #(num_unlabeled, num_classes)
+
+        new_prototypes = update_protos(u_latent, u_weights, labeled_prototypes, num_support=num_support)
+
+        ce_loss, acc = ProtoLoss(new_prototypes, x_latent, q_latent, q_labels, num_classes, num_unlabeled, num_support, num_queries)
+
+    if not eval:
+        weighter_grads = weighter_tape.gradient(ce_loss, weighter.trainable_variables)
+        embedder_grads = embedder_tape.gradient(ce_loss, embedder.trainable_variables)
+        optim.apply_gradients(zip(embedder_grads, embedder.trainable_variables))
+        optim.apply_gradients(zip(weighter_grads, weighter.trainable_variables))
+
     return ce_loss, acc
-"""
-def proto_net_eval(model, x, q, u, labels_ph):
+
+#def proto_net_eval(embedder, weighter, optim, x, q, u, labels_ph):
+
+
+def proto_net_eval(model, x, q, labels_ph):
+    print(f"Initial label shape: {labels_ph.shape}")
     num_classes, num_support, im_height, im_width, channels = x.shape
     num_queries = q.shape[1]
     x = tf.reshape(x, [-1, im_height, im_width, channels])
@@ -247,16 +219,22 @@ def proto_net_eval(model, x, q, u, labels_ph):
 
     x_latent = model(x)
     q_latent = model(q)
-    u_latent = model(u)
-    ce_loss, acc = ProtoLoss(x_latent, q_latent, labels_ph, num_classes, num_support, num_queries)
+    #u_latent = model(u)
+    x_labels = labels_ph[:, :num_support, :]
+    q_labels = labels_ph[:, num_support:, :]
+    print(f"sliced Query label shape: {labels_ph.shape}")
+
+    prototypes = get_prototypes(x_labels, x_latent, num_classes, num_support)
+    # ProtoLoss(new_prototypes, x_latent, q_latent, q_labels, num_classes, num_unlabeled, num_support, num_queries)
+    ce_loss, acc = ProtoLoss(prototypes, x_latent, q_latent, q_labels, num_classes, 0, num_support, num_queries)
 
     return ce_loss, acc 
-"""
+
 def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5, n_unlabeled = 5,
                  n_meta_test_way=20, k_meta_test_shot=5, n_meta_test_query=5, n_meta_test_unlabeled = 5,
                  logdir="../logs/"):
-    n_epochs = 20
-    n_episodes = 100
+    n_epochs = 1
+    n_episodes = 1
 
     im_width, im_height, channels = 28, 28, 1
     num_filters = 32
@@ -273,7 +251,7 @@ def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
 
     model = ProtoNet([num_filters]*num_conv_layers, latent_dim)
 
-    weighter = Sampler(hidden_dim, (n_way + 1)*latent_dim)
+    weighter = Sampler(hidden_dim, n_way)
     
     optimizer = tf.keras.optimizers.Adam()
 
@@ -299,7 +277,9 @@ def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
                                 shape=(n_way, n_query, im_height, im_width, 1))
             unlabeled = tf.reshape(images[0, :, n_query + k_shot:, :],
                                 shape=(n_way, n_unlabeled, im_height, im_width, 1))
-            labels = tf.reshape(labels[0, :, :k_shot + n_query, :], shape=(n_way, n_query, n_way))
+
+            #print(f"Shape of labels: {labels.shape}\tDesired shape: {(n_way, n_query, n_way)}")
+            labels = tf.reshape(labels[0, :, :k_shot + n_query, :], shape=(n_way, k_shot+n_query, n_way)) # (5, 10, 5)
             
             ls, ac = proto_net_train_step(model, weighter, optimizer, x=support, q=query, u=unlabeled, labels_ph=labels)
             if (epi+1) % 50 == 0:
@@ -310,10 +290,13 @@ def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
                                 shape=(n_way, k_shot, im_height, im_width, 1))
                 query = tf.reshape(images[0, :, k_shot:k_shot + n_query, :],
                                     shape=(n_way, n_query, im_height, im_width, 1))
-                unlabeled = tf.reshape(images[0,n_query + k_shot:, :],
+                unlabeled = tf.reshape(images[0, :, n_query + k_shot:, :],
                                 shape=(n_way, n_unlabeled, im_height, im_width, 1))
-                labels = tf.reshape(labels[0, :, :k_shot + n_query, :], shape=(n_way, n_query, n_way))
-                val_ls, val_ac = proto_net_eval(model, x=support, q=query, labels_ph=labels)
+                # unlabeled = tf.reshape(images[0, :, n_query + k_shot:, :],
+                                #shape=(n_way, n_unlabeled, im_height, im_width, 1))
+                labels = tf.reshape(labels[0, :, :k_shot + n_query, :], shape=(n_way, k_shot+n_query, n_way))
+                #labels = tf.reshape(labels[0, :, :k_shot + n_query, :], shape=(n_way, k_shot+n_query, n_way)) # (5, 10, 5)
+                val_ls, val_ac = proto_net_train_step(model, weighter, optimizer, x=support, q=query, u=unlabeled, labels_ph=labels, eval=True)
                 print(f'[epoch {ep + 1}/{n_epochs}, episode {epi + 1}/{n_episodes}] => meta-training loss: {ls:.5f}, meta-training acc: {ac:.5f}, meta-val loss: {val_ls:.5f}, meta-val acc: {val_ac:.5f}')
                 
                 output_data = output_data.append({'iter': ep*(n_episodes) + epi + 1,
@@ -334,10 +317,10 @@ def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
         images, labels = data_generator.sample_batch("meta_test", batch_size=1, shuffle=False)
         support = tf.reshape(images[0, :, :k_meta_test_shot, :],
                             shape=(n_meta_test_way, k_meta_test_shot, im_height, im_width, 1))
-        query = tf.reshape(images[0, :, k_meta_test_shot:, :],
+        query = tf.reshape(images[0, :, k_meta_test_shot:k_meta_test_shot+n_meta_test_query, :],
                             shape=(n_meta_test_way, n_meta_test_query, im_height, im_width, 1))
-        labels = tf.reshape(labels[0, :, k_meta_test_shot:, :],
-                            shape=(n_meta_test_way, n_meta_test_query, n_meta_test_way))
+        labels = tf.reshape(labels[0, :, :k_meta_test_shot+n_meta_test_query, :],
+                            shape=(n_meta_test_way, k_meta_test_shot+n_meta_test_query, n_meta_test_way))
         val_ls, val_ac = proto_net_eval(model, x=support, q=query, labels_ph=labels)
 
         ls, ac = proto_net_eval(model, x=support, q=query, labels_ph=labels)
