@@ -295,7 +295,7 @@ def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5,
                 # unlabeled = tf.reshape(images[0, :, n_query + k_shot:, :],
                                 #shape=(n_way, n_unlabeled, im_height, im_width, 1))
                 labels = tf.reshape(labels[0, :, :k_shot + n_query, :], shape=(n_way, k_shot+n_query, n_way))
-                #labels = tf.reshape(labels[0, :, :k_shot + n_query, :], shape=(n_way, k_shot+n_query, n_way)) # (5, 10, 5)
+                
                 val_ls, val_ac = proto_net_train_step(model, weighter, optimizer, x=support, q=query, u=unlabeled, labels_ph=labels, eval=True)
                 print(f'[epoch {ep + 1}/{n_epochs}, episode {epi + 1}/{n_episodes}] => meta-training loss: {ls:.5f}, meta-training acc: {ac:.5f}, meta-val loss: {val_ls:.5f}, meta-val acc: {val_ac:.5f}')
                 

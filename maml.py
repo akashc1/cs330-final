@@ -1,5 +1,5 @@
 import numpy as np
-import sys
+import sys, os
 import tensorflow as tf
 from functools import partial
 import csv
@@ -141,7 +141,6 @@ class MAML(tf.keras.Model):
                 task_output: a list of outputs, losses and accuracies at each inner update
             """
             # the inner and outer loop data
-            print(f"Inner loop input length: {len(inp)}")
             input_tr, input_ts, unlabeled, label_tr, label_ts = inp
             n_way = label_tr.shape[1]
             num_unlabeled = unlabeled.shape[0]
@@ -268,32 +267,30 @@ class MAML(tf.keras.Model):
         return result
 
 
+
 def outer_train_step(inp, model, optim, meta_batch_size=25, num_inner_updates=1, num_combined_updates=1):
 
-    print("Models' trainable variables: ", len(model.trainable_variables))
+
     with tf.GradientTape(persistent=False) as outer_tape_cls, tf.GradientTape(persistent=False) as outer_tape_swn:
-        result = model(inp, meta_batch_size=meta_batch_size, num_inner_updates=num_inner_updates)
+        result = model(inp, meta_batch_size=meta_batch_size, num_inner_updates=num_inner_updates, num_combined_updates=num_combined_updates)
 
         outputs_tr, outputs_ts, losses_tr_pre, losses_ts, accuracies_tr_pre, accuracies_ts = result
 
         total_losses_ts = [tf.reduce_mean(loss_ts) for loss_ts in losses_ts]
 
     # perform meta-update
-    cls_gradients = outer_tape_cls.gradient(total_losses_ts[-1], model.trainable_variables) # 
-    #swn_gradients = outer_tape_swn.gradient(total_losses_ts[-1], model.swn.trainable_variables)
-    print(f"Gradient length: {len(cls_gradients)}")
-    optim.apply_gradients(zip(cls_gradients, model.trainable_variables))
-    #optim.apply_gradients(zip(swn_gradients, model.swn.trainable_variables))
+    grads = outer_tape_cls.gradient(total_losses_ts[-1], model.trainable_variables) # 
+    optim.apply_gradients(zip(grads, model.trainable_variables))
 
     total_loss_tr_pre = tf.reduce_mean(losses_tr_pre)
     total_accuracy_tr_pre = tf.reduce_mean(accuracies_tr_pre)
-    total_accuracies_ts = [tf.reduce_mean(accuracy_ts) for accuracy_ts in accuracies_ts]
+    #total_accuracies_ts = [tf.reduce_mean(accuracy_ts) for accuracy_ts in accuracies_ts]
 
-    return outputs_tr, outputs_ts, total_loss_tr_pre, total_losses_ts, total_accuracy_tr_pre, total_accuracies_ts
+    return outputs_tr, outputs_ts, total_loss_tr_pre, total_losses_ts, total_accuracy_tr_pre, accuracies_ts
 
 
-def outer_eval_step(inp, model, meta_batch_size=25, num_inner_updates=1):
-  result = model(inp, meta_batch_size=meta_batch_size, num_inner_updates=num_inner_updates)
+def outer_eval_step(inp, model, meta_batch_size=25, num_inner_updates=1, num_combined_updates=1):
+  result = model(inp, meta_batch_size=meta_batch_size, num_inner_updates=num_inner_updates, num_combined_updates=num_combined_updates)
 
   outputs_tr, outputs_ts, losses_tr_pre, losses_ts, accuracies_tr_pre, accuracies_ts = result
 
@@ -316,9 +313,7 @@ def meta_train_fn(model, exp_string, data_generator,
     PRINT_INTERVAL = 10  
     TEST_PRINT_INTERVAL = PRINT_INTERVAL*5
 
-    
-
-    pre_accuracies, post_accuracies = [], []
+    pre_tr_accuracies, pre_combined_accuracies, post_accuracies = [], [], []
 
     num_classes = data_generator.num_classes
 
@@ -326,14 +321,18 @@ def meta_train_fn(model, exp_string, data_generator,
 
     # pandas DF to track running stats
     output_data = pd.DataFrame(columns=[
-                                        'iter', 'pre_inner_tr_acc',
-                                        'post_inner_ts_acc',
-                                        'pre_tr_loss', 'ts_loss',
-                                        'val_pre_tr_acc', 'val_post_ts_acc',
-                                        'val_pre_tr_loss', 'val_ts_loss'
+                                        'iter', 'pre_train_tr_acc',
+                                        'pre_combined_ts_acc',
+                                        'post_combined_ts_acc'
+                                        'pre_train_tr_loss', 'pre_combined_ts_loss',
+                                        'post_combined_ts_loss',
+                                        'val_pre_train_tr_acc', 'val_pre_combined_ts_acc',
+                                        'val_post_combined_ts_acc'
+                                        'val_pre_train_tr_loss', 'val_pre_combined_ts_loss',
+                                        'val_post_combined_ts_loss'
                                         ])
 
-    full_log_filename = logdir + output_filename + '.csv'
+    full_log_filename = logdir + "/logs/" + exp_string + '.csv'
 
     for itr in range(meta_train_iterations):
 
@@ -351,25 +350,27 @@ def meta_train_fn(model, exp_string, data_generator,
         q_label = tf.reshape(all_labels[:, :, k_shot:2*k_shot, :], new_shape_lbl)
 
         inp = (x, q, u, x_label, q_label)
-        print(len(inp))
-
-        result = outer_train_step(inp, model, optimizer, meta_batch_size=meta_batch_size, num_inner_updates=num_inner_updates, num_combined_updates=num_combined_updates)
+        result = outer_train_step(inp, model, optimizer, meta_batch_size=meta_batch_size,
+                                  num_inner_updates=num_inner_updates, num_combined_updates=num_combined_updates)
 
         if itr % SUMMARY_INTERVAL == 0:
-            pre_accuracies.append(result[-2])
+            pre_combined_accuracies.append(result[-1][-2])
+            pre_tr_accuracies.append(result[-2])
             post_accuracies.append(result[-1][-1])
 
         if (itr!=0) and itr % PRINT_INTERVAL == 0:
-            print_str = 'Iteration %d: pre-inner-loop train accuracy: %.5f, post-inner-loop test accuracy: %.5f' % (itr, np.mean(pre_accuracies), np.mean(post_accuracies))
+            print_str = 'Iteration %d: pre-inner-loop train accuracy: %.5f, post-inner-loop test accuracy: %.5f' % (itr, np.mean(pre_tr_accuracies), np.mean(pre_combined_accuracies))
             print(print_str)
             print(f"Total training loss pre: {result[2]}\tTotal test loss: {result[3][-1].numpy()}")
 
             output_data = output_data.append({
                 'iter': itr,
-                'pre_inner_tr_acc': np.mean(pre_accuracies),
-                'post_inner_ts_acc': np.mean(post_accuracies),
-                'pre_tr_loss': result[2],
-                'ts_loss': result[3][-1].numpy()
+                'pre_train_tr_acc': np.mean(pre_tr_accuracies),
+                'pre_combined_ts_acc': np.mean(pre_combined_accuracies),
+                'post_combined_ts_acc': np.mean(post_accuracies),
+                'pre_train_tr_loss': result[2],
+                'pre_combined_ts_loss': result[3][-2].numpy(),
+                'post_combined_ts_loss': result[3][-1].numpy()
             }, ignore_index=True)
 
             pre_accuracies, post_accuracies = [], []
@@ -383,28 +384,34 @@ def meta_train_fn(model, exp_string, data_generator,
             
             new_shape_im = (meta_batch_size, n_way * k_shot, all_images.shape[-1])
             new_shape_lbl = (meta_batch_size, n_way * k_shot, n_way)
-            input_tr = tf.reshape(all_images[:, :, :k_shot, :], new_shape_im)
-            input_ts = tf.reshape(all_images[:, :, k_shot:, :], new_shape_im)
-            label_tr = tf.reshape(all_labels[:, :, :k_shot, :], new_shape_lbl)
-            label_ts = tf.reshape(all_labels[:, :, k_shot:, :], new_shape_lbl)
+            x = tf.reshape(all_images[:, :, :k_shot, :], new_shape_im)
+            q = tf.reshape(all_images[:, :, k_shot:2*k_shot, :], new_shape_im)
+            u = tf.reshape(all_images[:, :, 2*k_shot:, :], (meta_batch_size, n_way * num_unlabeled, all_images.shape[-1]))
+            x_label = tf.reshape(all_labels[:, :, :k_shot, :], new_shape_lbl)
+            q_label = tf.reshape(all_labels[:, :, k_shot:2*k_shot, :], new_shape_lbl)
 
-            inp = (input_tr, input_ts, label_tr, label_ts)
-            result = outer_eval_step(inp, model, meta_batch_size=meta_batch_size, num_inner_updates=num_inner_updates)
+            inp = (x, q, u, x_label, q_label)
+            result = outer_eval_step(inp, model, meta_batch_size=meta_batch_size,
+                                        num_inner_updates=num_inner_updates, num_combined_updates=num_combined_updates)
 
             if (output_data['iter'] == itr).any():
             
                 row = output_data.loc[output_data['iter'] == itr].index[0]
-                output_data.loc[row, 'val_pre_tr_acc'] = result[-2].numpy()
-                output_data.loc[output_data['iter'] == itr, 'val_post_ts_acc'] = result[-1][-1].numpy()
-                output_data.loc[output_data['iter'] == itr, 'val_pre_tr_loss'] = result[2].numpy()
-                output_data.loc[output_data['iter'] == itr, 'val_ts_loss'] = result[3][-1].numpy()
+                output_data.loc[row, 'val_pre_train_tr_acc'] = result[-2].numpy()
+                output_data.loc[row, 'val_pre_combined_ts_acc'] = result[-1][-2].numpy()
+                output_data.loc[row, 'val_post_combined_ts_acc'] = result[-1][-1].numpy()
+                output_data.loc[row, 'val_pre_train_tr_loss'] = result[2].numpy()
+                output_data.loc[row, 'val_pre_combined_ts_loss'] = result[3][-2].numpy()
+                output_data.loc[row, 'val_post_combined_ts_loss'] = result[3][-1].numpy()
             else:
                 output_data = output_data.append({
                     'iter': itr,
-                    'val_pre_tr_acc': result[-2].numpy(),
-                    'val_post_ts_acc': result[-1][-1].numpy(),
-                    'val_pre_tr_loss': result[2].numpy(),
-                    'val_ts_loss': result[3][-1].numpy().numpy()
+                    'val_pre_train_tr_acc': result[-2].numpy(),
+                    'val_pre_combined_ts_acc': result[-1][-2].numpy(),
+                    'val_post_combined_ts_acc': result[-1][-1].numpy(),
+                    'val_pre_train_tr_loss': result[2].numpy(),
+                    'val_pre_combined_ts_loss': result[3][-2].numpy(),
+                    'val_post_combined_ts_loss': result[3][-1].numpy()
                 }, ignore_index=True)
 
             print('Meta-validation pre-inner-loop train accuracy: %.5f, meta-validation post-inner-loop test accuracy: %.5f' % (result[-2], result[-1][-1]))
@@ -420,9 +427,11 @@ def meta_train_fn(model, exp_string, data_generator,
 
 
 def meta_test_fn(model, data_generator, n_way=5, meta_batch_size=25, k_shot=1,
-              num_inner_updates=1):
+              num_inner_updates=1, num_unlabeled=1, num_combined_updates=1):
+
 
     NUM_META_TEST_POINTS = 600
+    PRINT_INTERVAL = 10
   
     num_classes = data_generator.num_classes
 
@@ -431,7 +440,7 @@ def meta_test_fn(model, data_generator, n_way=5, meta_batch_size=25, k_shot=1,
 
     meta_test_accuracies = []
 
-    for _ in range(NUM_META_TEST_POINTS):
+    for i in range(NUM_META_TEST_POINTS):
         
         # sample batch & partition into support/query sets, reshape
         all_images, all_labels = data_generator.sample_batch("meta_test",
@@ -440,15 +449,20 @@ def meta_test_fn(model, data_generator, n_way=5, meta_batch_size=25, k_shot=1,
         
         new_shape_im = (meta_batch_size, n_way * k_shot, all_images.shape[-1])
         new_shape_lbl = (meta_batch_size, n_way * k_shot, n_way)
-        input_tr = tf.reshape(all_images[:, :, :k_shot, :], new_shape_im)
-        input_ts = tf.reshape(all_images[:, :, k_shot:, :], new_shape_im)
-        label_tr = tf.reshape(all_labels[:, :, :k_shot, :], new_shape_lbl)
-        label_ts = tf.reshape(all_labels[:, :, k_shot:, :], new_shape_lbl)
+        x = tf.reshape(all_images[:, :, :k_shot, :], new_shape_im)
+        q = tf.reshape(all_images[:, :, k_shot:2*k_shot, :], new_shape_im)
+        u = tf.reshape(all_images[:, :, 2*k_shot:, :], (meta_batch_size, n_way * num_unlabeled, all_images.shape[-1]))
+        x_label = tf.reshape(all_labels[:, :, :k_shot, :], new_shape_lbl)
+        q_label = tf.reshape(all_labels[:, :, k_shot:2*k_shot, :], new_shape_lbl)
 
-        inp = (input_tr, input_ts, label_tr, label_ts)
-        result = outer_eval_step(inp, model, meta_batch_size=meta_batch_size, num_inner_updates=num_inner_updates)
+        inp = (x, q, u, x_label, q_label)
+        result = outer_eval_step(inp, model, meta_batch_size=meta_batch_size,
+                                 num_inner_updates=num_inner_updates, num_combined_updates=num_combined_updates)
 
         meta_test_accuracies.append(result[-1][-1])
+
+        if (i + 1) % PRINT_INTERVAL == 0:
+            print(f"Test iteration {i + 1}: accuracy = {result[-1][-1]:3f}")
 
     meta_test_accuracies = np.array(meta_test_accuracies)
     means = np.mean(meta_test_accuracies)
@@ -494,7 +508,7 @@ def run_maml(n_way=5, k_shot=1, meta_batch_size=25, meta_lr=0.001,
 
     #meta_batch_size=25, num_unlabeled, num_combined_updates,
     if meta_train:
-        filename = output_file if output_file is not None else exp_string
+        filename = output_file if output_file is not None else logdir + '/logs/' + exp_string + '.csv'
         output = meta_train_fn(model, exp_string, data_generator,
                     n_way, meta_train_iterations, meta_batch_size, num_unlabeled, num_combined_updates,
                     log, logdir, k_shot, num_inner_updates, meta_lr, output_filename=filename)
@@ -509,7 +523,10 @@ def run_maml(n_way=5, k_shot=1, meta_batch_size=25, meta_lr=0.001,
         print("Restoring model weights from ", model_file)
         model.load_weights(model_file)
 
-        meta_test_fn(model, data_generator, n_way, meta_batch_size, k_shot, num_inner_updates)
+        meta_test_fn(model, data_generator, n_way, meta_batch_size, k_shot,
+                     num_inner_updates=num_inner_updates,
+                     num_combined_updates=num_combined_updates,
+                     num_unlabeled=num_unlabeled)
 
 
 if __name__ == "__main__":

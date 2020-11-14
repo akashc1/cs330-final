@@ -10,7 +10,7 @@ def parse_args():
     parser.add_argument("learner", default="maml", choices=["maml", "protonet"],
                         help="Type of learning algorithm to use. Options are MAML and ProtoNet")
     parser.add_argument("--data-dir", default="../omniglot_resized")
-    parser.add_argument("--log-dir", default="../logs/")
+    parser.add_argument("--log-dir", default="..")
     parser.add_argument("--tf-verbosity", default='1', type=str)
 
     # common args
@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument("--meta-lr", default=1e-3, type=float)
     parser.add_argument("--meta-batch-size", default=25, type=int)
     parser.add_argument("--num-filters", default=32, type=int)
-    parser.add_argument("--meta-train", default=True, type=bool)
+    parser.add_argument("--meta-train", action="store_true")
     parser.add_argument("--meta-train-iterations", default=15000, type=int)
     parser.add_argument("--meta-train-k-shot", default=-1, type=int)
     parser.add_argument("--meta-train-inner-update-lr", default=-1.0, type=float)
@@ -46,6 +46,8 @@ from maml import run_maml
 from protonet import run_protonet
 
 def main(args):
+
+    print(f"Going to train: {args.meta_train}")
 
     if args.learner == "maml":
         run_maml(n_way=args.n_way,
