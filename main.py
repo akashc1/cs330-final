@@ -51,7 +51,8 @@ def main(args):
     print(f"Going to train: {args.meta_train}")
 
     if args.learner == "maml":
-        run_maml(n_way=args.n_way,
+        run_maml(baseline=args.baseline,
+                 n_way=args.n_way,
                  k_shot=args.k_shot,
                  meta_batch_size=args.meta_batch_size,
                  meta_lr=args.meta_lr,
@@ -67,6 +68,7 @@ def main(args):
                  meta_train_inner_update_lr=args.meta_train_inner_update_lr)
     elif args.learner == "protonet":
         run_protonet(data_path=args.data_dir,
+                     baseline=args.baseline,
                      n_way=args.n_way,
                      k_shot=args.k_shot,
                      n_query=args.n_query,

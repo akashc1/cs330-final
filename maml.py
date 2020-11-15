@@ -84,7 +84,7 @@ class Sampler(tf.keras.Model):
 class MAML(tf.keras.Model):
     def __init__(self, dim_input=1, dim_output=1,
                 num_inner_updates=1,
-                inner_update_lr=0.4, num_filters=32, n_way=5, k_shot=5, learn_inner_update_lr=False):
+                 inner_update_lr=0.4, num_filters=32, n_way=5, k_shot=5, learn_inner_update_lr=False, baseline=False):
         super(MAML, self).__init__()
         self.dim_input = dim_input
         self.dim_output = dim_output
@@ -92,6 +92,7 @@ class MAML(tf.keras.Model):
         self.loss_func = cross_entropy_loss
         self.dim_hidden = num_filters
         self.channels = 1
+        self.baseline=baseline
         self.img_size = int(np.sqrt(self.dim_input/self.channels))
         self.k_shot = k_shot
         seed = 42
@@ -199,37 +200,39 @@ class MAML(tf.keras.Model):
                     loss_ts = self.loss_func(out_ts, label_ts)
                     task_outputs_ts.append(out_ts)
                     task_losses_ts.append(loss_ts)
-                
-                out_unlabeled, unlabeled_embedding = self.conv_layers(unlabeled, updated_weights)
-                out_labeled, labeled_embedding = self.conv_layers(input_tr, updated_weights)
-                labeled_prototypes = get_prototypes(None, labeled_embedding, n_way, self.k_shot)
 
-                flattened_protos = tf.reshape(labeled_prototypes, (-1,)) #(num_classes * latent_dim,)
-                flattened_protos = tf.expand_dims(flattened_protos, axis=0)
-                flattened_protos = tf.tile(flattened_protos, multiples=[num_unlabeled, 1]) # (num_unlabeled, num_classes*latent_dim)
+                if not self.baseline:    
+                    out_unlabeled, unlabeled_embedding = self.conv_layers(unlabeled, updated_weights)
+                    out_labeled, labeled_embedding = self.conv_layers(input_tr, updated_weights)
+                    labeled_prototypes = get_prototypes(None, labeled_embedding, n_way, self.k_shot)
+
+                    flattened_protos = tf.reshape(labeled_prototypes, (-1,)) #(num_classes * latent_dim,)
+                    flattened_protos = tf.expand_dims(flattened_protos, axis=0)
+                    flattened_protos = tf.tile(flattened_protos, multiples=[num_unlabeled, 1]) # (num_unlabeled, num_classes*latent_dim)
        
-                weight_input = tf.concat([unlabeled_embedding, flattened_protos], axis=1)
-                loss_weights = self.swn(weight_input) # (num_unlabeled, n_way)
+                    weight_input = tf.concat([unlabeled_embedding, flattened_protos], axis=1)
+                    loss_weights = self.swn(weight_input) # (num_unlabeled, n_way)
 
-                for _ in range(num_combined_updates):
-                    out_lab, _ = self.conv_layers(input_tr, updated_weights)
-                    out_unlab, _ = self.conv_layers(unlabeled, updated_weights)
-                    unlabeled_labels = tf.one_hot(tf.argmax(out_unlab, axis=1), n_way)
-                    lab_loss = self.loss_func(out_lab, label_tr)
-                    unlab_loss = self.loss_func(out_unlab, unlabeled_labels, weights=loss_weights)
+                    for _ in range(num_combined_updates):
+                        out_lab, _ = self.conv_layers(input_tr, updated_weights)
+                        out_unlab, _ = self.conv_layers(unlabeled, updated_weights)
+                        unlabeled_labels = tf.one_hot(tf.argmax(out_unlab, axis=1), n_way)
+                        lab_loss = self.loss_func(out_lab, label_tr)
+                        unlab_loss = self.loss_func(out_unlab, unlabeled_labels, weights=loss_weights)
 
-                    combined_loss = lab_loss + unlab_loss
+                        combined_loss = lab_loss + unlab_loss
 
-                    model_grads = g1.gradient(combined_loss, list(updated_weights.values()))
-                    if self.learn_inner_update_lr:
-                        updated_weights = {var_name: var - self.inner_update_lr_dict[var_name][i + 1] * grad
-                                    for (var_name, var), grad in zip(updated_weights.items(), model_grads)}
-                    else:
-                        updated_weights = {var_name: var - self.inner_update_lr * grad
-                                    for (var_name, var), grad in zip(updated_weights.items(), model_grads)}
+                        model_grads = g1.gradient(combined_loss, list(updated_weights.values()))
+                        if self.learn_inner_update_lr:
+                            updated_weights = {var_name: var - self.inner_update_lr_dict[var_name][i + 1] * grad
+                                               for (var_name, var), grad in zip(updated_weights.items(), model_grads)}
+                        else:
+                            updated_weights = {var_name: var - self.inner_update_lr * grad
+                                               for (var_name, var), grad in zip(updated_weights.items(), model_grads)}
                 
-                out_ts, _ = self.conv_layers(input_ts, updated_weights)
-                loss_ts = self.loss_func(out_ts, label_ts)
+                    out_ts, _ = self.conv_layers(input_ts, updated_weights)
+                    loss_ts = self.loss_func(out_ts, label_ts)
+                #These values will simply be repeats for the baseline model (same variables as line 198, 199)
                 task_outputs_ts.append(out_ts)
                 task_losses_ts.append(loss_ts)
         
@@ -268,9 +271,10 @@ class MAML(tf.keras.Model):
 
 
 
-def outer_train_step(inp, model, optim, meta_batch_size=25, num_inner_updates=1, num_combined_updates=1):
+def outer_train_step(inp, model, optim, meta_batch_size=25, num_inner_updates=1, num_combined_updates=1, baseline=False):
 
-
+    if baseline:
+        print("outer step with baseline")
     with tf.GradientTape(persistent=False) as outer_tape_cls, tf.GradientTape(persistent=False) as outer_tape_swn:
         result = model(inp, meta_batch_size=meta_batch_size, num_inner_updates=num_inner_updates, num_combined_updates=num_combined_updates)
 
@@ -306,7 +310,7 @@ def outer_eval_step(inp, model, meta_batch_size=25, num_inner_updates=1, num_com
 def meta_train_fn(model, exp_string, data_generator,
                n_way=5, meta_train_iterations=15000, meta_batch_size=25, num_unlabeled=1, num_combined_updates=1,
                log=True, logdir='../logs/', k_shot=1, num_inner_updates=1, meta_lr=0.001,
-               output_filename=None):
+                  output_filename=None, baseline=False):
     
     SUMMARY_INTERVAL = 10
     SAVE_INTERVAL = 100
@@ -351,7 +355,7 @@ def meta_train_fn(model, exp_string, data_generator,
 
         inp = (x, q, u, x_label, q_label)
         result = outer_train_step(inp, model, optimizer, meta_batch_size=meta_batch_size,
-                                  num_inner_updates=num_inner_updates, num_combined_updates=num_combined_updates)
+                                  num_inner_updates=num_inner_updates, num_combined_updates=num_combined_updates, baseline=baseline)
 
         if itr % SUMMARY_INTERVAL == 0:
             pre_combined_accuracies.append(result[-1][-2])
@@ -478,9 +482,10 @@ def run_maml(n_way=5, k_shot=1, meta_batch_size=25, meta_lr=0.001,
              resume=False, resume_itr=0, log=True, logdir='/tmp/data',
              data_path='../omniglot_resized',meta_train=True,
              meta_train_iterations=15000, meta_train_k_shot=-1,
-             meta_train_inner_update_lr=-1, output_file=None):
+             meta_train_inner_update_lr=-1, output_file=None, baseline=False):
 
-
+    if baseline:
+        print("Running baseline model (no retraining with combined examples)") 
     # call data_generator and get data with k_shot*2 samples per class
     data_generator = DataGenerator(n_way, k_shot*2 + num_unlabeled, n_way, k_shot*2 + num_unlabeled, config={'data_folder': data_path})
 
@@ -495,7 +500,8 @@ def run_maml(n_way=5, k_shot=1, meta_batch_size=25, meta_lr=0.001,
                 inner_update_lr=inner_update_lr,
                 k_shot=k_shot,
                 num_filters=num_filters,
-                learn_inner_update_lr=learn_inner_update_lr)
+                learn_inner_update_lr=learn_inner_update_lr,
+                baseline=baseline)
 
     
 
@@ -511,7 +517,7 @@ def run_maml(n_way=5, k_shot=1, meta_batch_size=25, meta_lr=0.001,
         filename = output_file if output_file is not None else logdir + '/logs/' + exp_string + '.csv'
         output = meta_train_fn(model, exp_string, data_generator,
                     n_way, meta_train_iterations, meta_batch_size, num_unlabeled, num_combined_updates,
-                    log, logdir, k_shot, num_inner_updates, meta_lr, output_filename=filename)
+                               log, logdir, k_shot, num_inner_updates, meta_lr, output_filename=filename)
         
         output.to_csv(filename)
 

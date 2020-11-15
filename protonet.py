@@ -160,7 +160,7 @@ def update_protos(u_latent, u_weights, labeled_prototypes, num_support):
     return new_prototypes #(num_classes, latent_dim)
 
 
-def proto_net_train_step(embedder, weighter, optim, x, q, u, labels_ph, eval=False):
+def proto_net_train_step(embedder, weighter, optim, x, q, u, labels_ph, eval=False, baseline=False):
     num_classes, num_support, im_height, im_width, channels = x.shape
     num_queries = q.shape[1]
     x = tf.reshape(x, [-1, im_height, im_width, channels])
@@ -186,16 +186,18 @@ def proto_net_train_step(embedder, weighter, optim, x, q, u, labels_ph, eval=Fal
         latent_dim = x_latent.shape[-1]
 
         labeled_prototypes = get_prototypes(x_labels, x_latent, num_classes, num_support) # (num_classes, latent_dim)
-
-        #Create weights for unlabeled samples
-        flattened_protos = tf.reshape(labeled_prototypes, (-1,)) #(num_classes * latent_dim,)
-        flattened_protos = tf.expand_dims(flattened_protos, axis=0)
-        flattened_protos = tf.tile(flattened_protos, multiples=[num_unlabeled, 1]) # (num_unlabeled, num_classes*latent_dim)
+        if not baseline:
+            #Create weights for unlabeled samples
+            flattened_protos = tf.reshape(labeled_prototypes, (-1,)) #(num_classes * latent_dim,)
+            flattened_protos = tf.expand_dims(flattened_protos, axis=0)
+            flattened_protos = tf.tile(flattened_protos, multiples=[num_unlabeled, 1]) # (num_unlabeled, num_classes*latent_dim)
        
-        weight_input = tf.concat([u_latent, flattened_protos], axis=1) #(num_unlabeled, latent_dim*num_classes+1)
-        u_weights = weighter(weight_input) #(num_unlabeled, num_classes)
+            weight_input = tf.concat([u_latent, flattened_protos], axis=1) #(num_unlabeled, latent_dim*num_classes+1)
+            u_weights = weighter(weight_input) #(num_unlabeled, num_classes)
 
-        new_prototypes = update_protos(u_latent, u_weights, labeled_prototypes, num_support=num_support)
+            new_prototypes = update_protos(u_latent, u_weights, labeled_prototypes, num_support=num_support)
+        else:
+            new_prototypes = labeled_prototypes
 
         ce_loss, acc = ProtoLoss(new_prototypes, x_latent, q_latent, q_labels, num_classes, num_unlabeled, num_support, num_queries)
 
@@ -243,6 +245,9 @@ def run_protonet(data_path='../omniglot_resized', baseline=False, n_way=20, k_sh
     num_conv_layers = 3
     n_meta_test_episodes = 1000
 
+    if baseline:
+        print("Running baseline model (no unlabeled refinement of prototypes)")
+
     output_data = pd.DataFrame(columns=[
                                         'iter', 'tr_acc',
                                         'val_acc',
@@ -281,7 +286,7 @@ def run_protonet(data_path='../omniglot_resized', baseline=False, n_way=20, k_sh
             #print(f"Shape of labels: {labels.shape}\tDesired shape: {(n_way, n_query, n_way)}")
             labels = tf.reshape(labels[0, :, :k_shot + n_query, :], shape=(n_way, k_shot+n_query, n_way)) # (5, 10, 5)
             
-            ls, ac = proto_net_train_step(model, weighter, optimizer, x=support, q=query, u=unlabeled, labels_ph=labels)
+            ls, ac = proto_net_train_step(model, weighter, optimizer, x=support, q=query, u=unlabeled, labels_ph=labels, baseline=baseline)
             if (epi+1) % 50 == 0:
                 print("hello")
                 # sample batch, partition into support/query, reshape NOT unlabeled
