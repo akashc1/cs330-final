@@ -202,11 +202,15 @@ def proto_net_train_step(embedder, weighter, optim, x, q, u, labels_ph, eval=Fal
         ce_loss, acc = ProtoLoss(new_prototypes, x_latent, q_latent, q_labels, num_classes, num_unlabeled, num_support, num_queries)
 
     if not eval:
-        weighter_grads = weighter_tape.gradient(ce_loss, weighter.trainable_variables)
-        embedder_grads = embedder_tape.gradient(ce_loss, embedder.trainable_variables)
-        optim.apply_gradients(zip(embedder_grads, embedder.trainable_variables))
-        optim.apply_gradients(zip(weighter_grads, weighter.trainable_variables))
+        if not baseline:
+            weighter_grads = weighter_tape.gradient(ce_loss, weighter.trainable_variables)
+            embedder_grads = embedder_tape.gradient(ce_loss, embedder.trainable_variables)
+            optim.apply_gradients(zip(embedder_grads, embedder.trainable_variables))
+            optim.apply_gradients(zip(weighter_grads, weighter.trainable_variables))
 
+        else:
+            embedder_grads = embedder_tape.gradient(ce_loss, embedder.trainable_variables)
+            optim.apply_gradients(zip(embedder_grads, embedder.trainable_variables))
     return ce_loss, acc
 
 #def proto_net_eval(embedder, weighter, optim, x, q, u, labels_ph):
@@ -235,8 +239,8 @@ def proto_net_eval(model, x, q, labels_ph):
 def run_protonet(data_path='../omniglot_resized', baseline=False, n_way=20, k_shot=1, n_query=5, n_unlabeled = 5,
                  n_meta_test_way=20, k_meta_test_shot=5, n_meta_test_query=5, n_meta_test_unlabeled = 5,
                  logdir="../logs/"):
-    n_epochs = 1
-    n_episodes = 1
+    n_epochs = 20
+    n_episodes = 100
 
     im_width, im_height, channels = 28, 28, 1
     num_filters = 32
@@ -273,7 +277,7 @@ def run_protonet(data_path='../omniglot_resized', baseline=False, n_way=20, k_sh
 
     for ep in range(n_epochs):
         for epi in range(n_episodes):
-            print("epi ", epi)
+            #print("epi ", epi)
             # sample batch, partition into support/query/unlabeled, reshape
             images, labels = data_generator.sample_batch("meta_train", batch_size=1, shuffle=False)
             support = tf.reshape(images[0, :, :k_shot, :],
@@ -288,7 +292,7 @@ def run_protonet(data_path='../omniglot_resized', baseline=False, n_way=20, k_sh
             
             ls, ac = proto_net_train_step(model, weighter, optimizer, x=support, q=query, u=unlabeled, labels_ph=labels, baseline=baseline)
             if (epi+1) % 50 == 0:
-                print("hello")
+                #print("hello")
                 # sample batch, partition into support/query, reshape NOT unlabeled
                 images, labels = data_generator.sample_batch("meta_val", batch_size=1, shuffle=False)
                 support = tf.reshape(images[0, :, :k_shot, :],

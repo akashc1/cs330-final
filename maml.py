@@ -308,8 +308,8 @@ def outer_eval_step(inp, model, meta_batch_size=25, num_inner_updates=1, num_com
 
 
 def meta_train_fn(model, exp_string, data_generator,
-               n_way=5, meta_train_iterations=15000, meta_batch_size=25, num_unlabeled=1, num_combined_updates=1,
-               log=True, logdir='../logs/', k_shot=1, num_inner_updates=1, meta_lr=0.001,
+               n_way=5, meta_train_iterations=15000, meta_batch_size=25, num_unlabeled=5, num_combined_updates=10,
+               log=True, logdir='../logs/', k_shot=5, num_inner_updates=10, meta_lr=0.001,
                   output_filename=None, baseline=False):
     
     SUMMARY_INTERVAL = 10
