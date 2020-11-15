@@ -12,6 +12,7 @@ def parse_args():
     parser.add_argument("--data-dir", default="../omniglot_resized")
     parser.add_argument("--log-dir", default="..")
     parser.add_argument("--tf-verbosity", default='1', type=str)
+    parser.add_argument("--baseline", action="store_true")
 
     # common args
     parser.add_argument("--n-way", default=5, type=int)

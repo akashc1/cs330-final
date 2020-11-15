@@ -211,7 +211,7 @@ def proto_net_train_step(embedder, weighter, optim, x, q, u, labels_ph, eval=Fal
 
 
 def proto_net_eval(model, x, q, labels_ph):
-    print(f"Initial label shape: {labels_ph.shape}")
+    #print(f"Initial label shape: {labels_ph.shape}")
     num_classes, num_support, im_height, im_width, channels = x.shape
     num_queries = q.shape[1]
     x = tf.reshape(x, [-1, im_height, im_width, channels])
@@ -222,7 +222,7 @@ def proto_net_eval(model, x, q, labels_ph):
     #u_latent = model(u)
     x_labels = labels_ph[:, :num_support, :]
     q_labels = labels_ph[:, num_support:, :]
-    print(f"sliced Query label shape: {labels_ph.shape}")
+    #print(f"sliced Query label shape: {labels_ph.shape}")
 
     prototypes = get_prototypes(x_labels, x_latent, num_classes, num_support)
     # ProtoLoss(new_prototypes, x_latent, q_latent, q_labels, num_classes, num_unlabeled, num_support, num_queries)
@@ -230,7 +230,7 @@ def proto_net_eval(model, x, q, labels_ph):
 
     return ce_loss, acc 
 
-def run_protonet(data_path='../omniglot_resized', n_way=20, k_shot=1, n_query=5, n_unlabeled = 5,
+def run_protonet(data_path='../omniglot_resized', baseline=False, n_way=20, k_shot=1, n_query=5, n_unlabeled = 5,
                  n_meta_test_way=20, k_meta_test_shot=5, n_meta_test_query=5, n_meta_test_unlabeled = 5,
                  logdir="../logs/"):
     n_epochs = 1
